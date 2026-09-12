@@ -1978,17 +1978,27 @@ ORDER_JSON>>>`;
     // ==========================================
     // 8. QR CODE & NAVIGATION HELPERS
     // ==========================================
-    function initQrCode() {
-      const box = document.getElementById('qr-display-box');
-      box.innerHTML = '';
-      new QRCode(box, {
-        text: `https://wa.me/qr/AUTOWA_${Math.random().toString(36).slice(2)}`,
-        width: 190,
-        height: 190,
-        colorDark: "#020617",
-        colorLight: "#ffffff"
-      });
+    const BACKEND_URL = "https://whatsappbot-f8io.onrender.com";
+const socket = io(BACKEND_URL);
+
+function initQrCode() {
+    const box = document.getElementById('qr-display-box');
+    if (box) box.innerHTML = '<div class="text-xs text-slate-400 p-4">Connecting to WhatsApp Server...</div>';
+}
+
+socket.on('qr', (qrDataUrl) => {
+    const box = document.getElementById('qr-display-box');
+    if (box) {
+        box.innerHTML = `<img src="${qrDataUrl}" alt="Scan QR" class="w-48 h-48 mx-auto rounded-lg shadow-md" />`;
     }
+});
+
+socket.on('status', (data) => {
+    if (data.connected) {
+        APP_STATE.isWhatsAppConnected = true;
+        toggleWhatsAppConnection();
+    }
+});
 
     function refreshQrCode() {
       initQrCode();
