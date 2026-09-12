@@ -1979,27 +1979,22 @@ ORDER_JSON>>>`;
     // ==========================================
     // 8. QR CODE & NAVIGATION HELPERS
     // ==========================================
-    const BACKEND_URL = "https://whatsappbot-f8io.onrender.com";
-const socket = io(BACKEND_URL);
-
-function initQrCode() {
+    async function initQrCode() {
     const box = document.getElementById('qr-display-box');
-    if (box) box.innerHTML = '<div class="text-xs text-slate-400 p-4">Connecting to WhatsApp Server...</div>';
-}
+    if (!box) return;
 
-socket.on('qr', (qrDataUrl) => {
-    const box = document.getElementById('qr-display-box');
-    if (box) {
-        box.innerHTML = `<img src="${qrDataUrl}" alt="Scan QR" class="w-48 h-48 mx-auto rounded-lg shadow-md" />`;
+    try {
+        const res = await fetch('https://whatsappbot-f8io.onrender.com/api/status');
+        const data = await res.json();
+        if (data.qr) {
+            box.innerHTML = '<img src="' + data.qr + '" style="width:200px;height:200px;margin:auto;display:block;background:#fff;padding:8px;border-radius:8px;" />';
+        } else if (data.connected) {
+            box.innerHTML = '<div style="color:#10b981;font-weight:bold;padding:20px;">Connected Successfully!</div>';
+        }
+    } catch(err) {
+        console.error(err);
     }
-});
-
-socket.on('status', (data) => {
-    if (data.connected) {
-        APP_STATE.isWhatsAppConnected = true;
-        toggleWhatsAppConnection();
     }
-});
 
     function refreshQrCode() {
       initQrCode();
