@@ -5,7 +5,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const QRCode = require('qrcode');
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // WhatsApp Baileys Engine
 const {
@@ -24,7 +24,8 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Gemini AI Setup
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
 let sock = null;
 let currentQR = null;
@@ -32,20 +33,18 @@ let isConnected = false;
 let catalog = [];
 let orders = [];
 
-// System AI Instruction Template
 function getSystemPrompt() {
     const catalogText = catalog.map(p => `- ${p.name} (SKU: ${p.sku}): ₹${p.price} [Stock: ${p.stock}]`).join('\n');
     return `
-Aap Shubh Enterprise ke WhatsApp Sales & Order Assistant hain. Aap customers se Hinglish me bohot polite, professional aur natural baat karte hain.
-
+Aap Shubh Enterprise ke WhatsApp Sales Assistant hain. Customers se Hinglish me polite baat karein.
 Available Products & Prices:
-${catalogText || 'Products catalog update ho raha hai.'}
+${catalogText || 'Catalog update ho raha hai.'}
 
-Aapke Rules:
-1. Customer jo bhi spare part maange, availability aur price batayein.
-2. Discount customer mange to maximum 5% bol sakte hain agar order bada ho.
-3. Order finalize karne ke liye Customer se: (a) Delivery Address aur (b) Items confirm karein.
-4. JAISE HI CUSTOMER ADDRESS DE AUR ORDER CONFIRM KARE, aapko apne final reply ke sabse aakhri me exactly ye JSON block lagana hai:
+Rules:
+1. Customer jo part maange uska price batayein.
+2. Max discount 5% de sakte hain.
+3. Deal pakki hone par Delivery Address aur item details lein.
+4. ORDER FINAL HOTE HI reply ke end me ye JSON zaroor dalein:
 <<<ORDER_JSON
 {
   "customer_name": "Customer Name",
@@ -54,11 +53,9 @@ Aapke Rules:
   "address": "Customer ka complete address"
 }
 ORDER_JSON>>>
-5. Normal baatchit me JSON mat bhejna, sirf order confirm hone par hi aakhri me bhejna.
 `;
 }
 
-// 1. WhatsApp Connection Handler
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version } = await fetchLatestBaileysVersion();
@@ -66,7 +63,7 @@ async function connectToWhatsApp() {
     sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: true
+        printQRInTerminal: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -83,18 +80,15 @@ async function connectToWhatsApp() {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             isConnected = false;
             io.emit('status', { connected: false });
-            if (shouldReconnect) {
-                connectToWhatsApp();
-            }
+            if (shouldReconnect) connectToWhatsApp();
         } else if (connection === 'open') {
             isConnected = true;
             currentQR = null;
             io.emit('status', { connected: true });
-            console.log('WhatsApp successfully connected!');
+            console.log('WhatsApp connected successfully!');
         }
     });
 
-    // 2. Incoming Messages Listener (AI Auto-Reply)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
@@ -102,26 +96,16 @@ async function connectToWhatsApp() {
 
         const sender = msg.key.remoteJid;
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-
         if (!text) return;
-        console.log(`Received from ${sender}: ${text}`);
 
         io.emit('new_message', { sender, text, direction: 'in' });
 
-        // Generate Reply via Gemini AI
         try {
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: text,
-                config: {
-                    systemInstruction: getSystemPrompt()
-                }
-            });
-
-            const reply = response.text || '';
+            const prompt = `${getSystemPrompt()}\n\nCustomer Message: "${text}"\nAapka reply:`;
+            const result = await model.generateContent(prompt);
+            const reply = result.response.text();
             let cleanReply = reply;
 
-            // Check if Order was finalized
             if (reply.includes('<<<ORDER_JSON')) {
                 const jsonMatch = reply.match(/<<<ORDER_JSON([\s\S]*?)ORDER_JSON>>>/);
                 if (jsonMatch && jsonMatch[1]) {
@@ -131,60 +115,48 @@ async function connectToWhatsApp() {
                         orderData.id = 'ORD-' + Date.now().toString().slice(-4);
                         orderData.date = new Date().toLocaleString('en-IN');
                         orders.unshift(orderData);
-
                         io.emit('new_order', orderData);
                         cleanReply = reply.replace(/<<<ORDER_JSON[\s\S]*?ORDER_JSON>>>/, '').trim();
                     } catch (e) {
-                        console.error('JSON parse error:', e);
+                        console.error('JSON Error:', e);
                     }
                 }
             }
 
-            // Send WhatsApp Response back to Customer
             await sock.sendMessage(sender, { text: cleanReply });
             io.emit('new_message', { sender, text: cleanReply, direction: 'out' });
-
         } catch (err) {
-            console.error('AI Reply failed:', err);
+            console.error('AI error:', err);
         }
     });
 }
 
-// 3. API Routes for Website Dashboard Control
-app.get('/api/status', (req, res) => {
-    res.json({ connected: isConnected, qr: currentQR });
-});
+app.get('/api/status', (req, res) => res.json({ connected: isConnected, qr: currentQR }));
 
 app.post('/api/sync-catalog', (req, res) => {
     catalog = req.body.products || [];
     res.json({ success: true, count: catalog.length });
 });
 
-// Broadcast / Sheet Campaign Endpoint
 app.post('/api/send-campaign', async (req, res) => {
     const { contacts, template, delaySeconds } = req.body;
-    if (!isConnected || !sock) {
-        return res.status(400).json({ error: 'WhatsApp not connected' });
-    }
+    if (!isConnected || !sock) return res.status(400).json({ error: 'WhatsApp not connected' });
 
-    res.json({ success: true, message: 'Campaign started in background' });
+    res.json({ success: true, message: 'Campaign started' });
 
-    // Send messages one by one with human-like safety delay
     for (const contact of contacts) {
         let phone = contact.phone.replace(/[^0-9]/g, '');
         if (phone.length === 10) phone = '91' + phone;
         const jid = `${phone}@s.whatsapp.net`;
-        const messageText = template.replace('{{name}}', contact.name);
+        const msg = template.replace('{{name}}', contact.name);
 
         try {
-            await sock.sendMessage(jid, { text: messageText });
+            await sock.sendMessage(jid, { text: msg });
             io.emit('campaign_progress', { phone, name: contact.name, status: 'Sent' });
-        } catch (error) {
+        } catch (err) {
             io.emit('campaign_progress', { phone, name: contact.name, status: 'Failed' });
         }
-
-        const waitTime = (delaySeconds || 20) * 1000;
-        await new Promise((r) => setTimeout(r, waitTime));
+        await new Promise(r => setTimeout(r, (delaySeconds || 20) * 1000));
     }
 });
 
@@ -196,7 +168,7 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
     connectToWhatsApp();
 });
               
