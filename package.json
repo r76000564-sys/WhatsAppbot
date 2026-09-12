@@ -8,9 +8,9 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.8",
+    "@google/generative-ai": "^0.21.0",
     "express": "^4.19.2",
     "socket.io": "^4.7.5",
-    "@google/genai": "^0.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "qrcode": "^1.5.3"
